@@ -6,7 +6,7 @@ from typing import Dict, Any, List
 
 from langchain.agents import AgentExecutor, create_tool_calling_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage # Добавлены AIMessage, ToolMessage для преобразования
 from langchain_core.callbacks import BaseCallbackHandler
 
 from llm_integrations import LLMIntegration
@@ -92,15 +92,36 @@ async def create_agent_from_config(agent_id: str, telegram_callback_handler: Tel
             async def ainvoke(self, input_data: Dict[str, Any]):
                 user_message = input_data.get('input', '')
                 
-                # Формируем список сообщений для LLM
-                messages_for_llm: List[Any] = [SystemMessage(content=self.system_prompt), HumanMessage(content=user_message)]
+                temp_prompt = ChatPromptTemplate.from_messages([
+                    ("system", self.system_prompt),
+                    ("human", "{user_input_content}")
+                ])
+                
+                # Получаем список кортежей (role_str, content_str)
+                raw_messages_from_prompt = temp_prompt.format_messages(user_input_content=user_message)
+                
+                # ПРЕОБРАЗОВАНИЕ КОРТЕЖЕЙ В ОБЪЕКТЫ BaseMessage
+                messages_for_llm: List[Any] = []
+                for role_str, content_str in raw_messages_from_prompt:
+                    if role_str == "system":
+                        messages_for_llm.append(SystemMessage(content=content_str))
+                    elif role_str == "human":
+                        messages_for_llm.append(HumanMessage(content=content_str))
+                    elif role_str == "ai": # На случай, если в будущем будут AIMessage
+                        messages_for_llm.append(AIMessage(content=content_str))
+                    elif role_str == "tool": # На случай, если будут ToolMessage
+                        # ToolMessage требует tool_call_id, который не возвращается format_messages.
+                        # Это просто заглушка или для более сложных сценариев.
+                        messages_for_llm.append(ToolMessage(content=content_str, tool_call_id="unknown_tool_id"))
+                    else:
+                        logger.warning(f"Unsupported message role from ChatPromptTemplate: {role_str}. Treating as HumanMessage.")
+                        messages_for_llm.append(HumanMessage(content=f"[{role_str}] {content_str}"))
 
                 if hasattr(self.llm_instance, 'generate'): # For our custom HyperbolicLLM
                     response_content = await self.llm_instance.generate(messages_for_llm)
                     return {"output": response_content}
                 else: # For LangChain ChatOpenAI LLM and Nous LLM (теперь OpenRouter)
-                    # Возвращаемся к прямому списку сообщений, что должно быть стабильно с зафиксированными версиями
-                    response = await self.llm_instance.ainvoke(messages_for_llm) # <-- ИЗМЕНЕНО: Прямо список BaseMessage
+                    response = await self.llm_instance.ainvoke(messages_for_llm)
                     return {"output": response.content}
 
         return SimpleChainWrapper(llm, config['system_prompt'])
