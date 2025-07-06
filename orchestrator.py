@@ -6,7 +6,7 @@ from typing import Dict, Any, List
 
 from langchain.agents import AgentExecutor, create_tool_calling_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.messages import SystemMessage, HumanMessage # Обратите внимание, AIMessage и ToolMessage импортируются в llm_integrations
+from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.callbacks import BaseCallbackHandler
 
 from llm_integrations import LLMIntegration
@@ -22,25 +22,27 @@ class TelegramCallbackHandler(BaseCallbackHandler):
     Коллбэк-обработчик для LangChain, который отправляет информацию о действиях агента в Telegram.
     """
     def __init__(self, chat_id: int, send_message_callback):
-        super().__init__() # Вызов конструктора родительского класса
+        super().__init__()
         self.chat_id = chat_id
         self.send_message_callback = send_message_callback
 
     async def on_agent_action(self, action: Any, **kwargs: Any) -> Any:
-        # Логируем действия агента (что он решил сделать)
         log_message = action.log
         if len(log_message) > 500:
             log_message = log_message[:497] + "..."
-        await self.send_message_callback(self.chat_id, f"➡️ _{log_message}_", parse_mode='Markdown')
+        # Экранируем потенциальные символы Markdown в логе, чтобы избежать BadRequest
+        escaped_log_message = log_message.replace('_', r'\_').replace('*', r'\*').replace('`', r'\`')
+        await self.send_message_callback(self.chat_id, f"➡️ _{escaped_log_message}_", parse_mode='Markdown')
 
     async def on_tool_start(self, serialized: Dict[str, Any], input_str: str, **kwargs: Any) -> Any:
         tool_name = serialized.get("name", "Unknown Tool")
         await self.send_message_callback(self.chat_id, f"🛠️ *Использую инструмент* `{tool_name}`: `{input_str}`", parse_mode='Markdown')
 
     async def on_tool_end(self, output: str, **kwargs: Any) -> Any:
-        # Обрезаем вывод, чтобы не спамить и не превышать лимиты Telegram
         truncated_output = (output[:500] + '...') if len(output) > 500 else output
-        await self.send_message_callback(self.chat_id, f"✅ *Инструмент завершил работу.* Результат (обрезано): `{truncated_output}`", parse_mode='Markdown')
+        # Экранируем потенциальные символы Markdown
+        escaped_output = truncated_output.replace('_', r'\_').replace('*', r'\*').replace('`', r'\`')
+        await self.send_message_callback(self.chat_id, f"✅ *Инструмент завершил работу.* Результат (обрезано): `{escaped_output}`", parse_mode='Markdown')
 
     async def on_agent_finish(self, finish: Any, **kwargs: Any) -> Any:
         pass
@@ -90,14 +92,15 @@ async def create_agent_from_config(agent_id: str, telegram_callback_handler: Tel
             async def ainvoke(self, input_data: Dict[str, Any]):
                 user_message = input_data.get('input', '')
                 
-                messages_for_llm: List[Any] = [SystemMessage(content=self.system_prompt), HumanMessage(content=user_message)]
-
-                if hasattr(self.llm_instance, 'generate'): # For our custom HyperbolicLLM
+                # Для HyperbolicLLM, который ожидает List[BaseMessage] для своего generate метода
+                if hasattr(self.llm_instance, 'generate'):
+                    messages_for_llm: List[Any] = [SystemMessage(content=self.system_prompt), HumanMessage(content=user_message)]
                     response_content = await self.llm_instance.generate(messages_for_llm)
                     return {"output": response_content}
-                else: # For LangChain ChatOpenAI LLM and Nous LLM
-                    # ИЗМЕНЕНО ЗДЕСЬ: Передаем список BaseMessage напрямую
-                    response = await self.llm_instance.ainvoke(messages_for_llm) # <-- ИЗМЕНЕНО
+                else: # For LangChain ChatOpenAI LLM and Nous LLM (теперь OpenRouter)
+                    # ИЗМЕНЕНО: Передаем весь промпт как одну строку, чтобы обойти ошибку типов
+                    combined_prompt_string = f"Системная инструкция: {self.system_prompt}\n\nПользовательский ввод: {user_message}"
+                    response = await self.llm_instance.ainvoke(combined_prompt_string) # <-- ИЗМЕНЕНО
                     return {"output": response.content}
 
         return SimpleChainWrapper(llm, config['system_prompt'])
@@ -123,7 +126,8 @@ async def run_full_agent_process(user_query: str, chat_id: int, send_message_cal
         refined_query = a1_result.get('output', "Не удалось уточнить запрос.")
         await send_message_callback(chat_id, f"📝 **Агент #1 завершил.** Уточненный запрос:\n```\n{refined_query}\n```", parse_mode='Markdown')
     except Exception as e:
-        await send_message_callback(chat_id, f"⚠️ **Ошибка Агента #1:** {e}")
+        escaped_error_msg = str(e).replace('_', r'\_').replace('*', r'\*').replace('`', r'\`')
+        await send_message_callback(chat_id, f"⚠️ **Ошибка Агента #1:** {escaped_error_msg}", parse_mode='Markdown')
         logger.exception("Agent 1 failed.")
         return
 
@@ -163,16 +167,19 @@ async def run_full_agent_process(user_query: str, chat_id: int, send_message_cal
             logger.info(f"Agent 2 output plan: {orchestration_plan}")
 
         except json.JSONDecodeError as e:
-            await send_message_callback(chat_id, f"⚠️ **Ошибка парсинга плана Агента #2:** Ожидался JSON, но получен некорректный формат. {e}\nRaw output: ```{orchestration_plan_raw}```", parse_mode='Markdown')
+            escaped_error_msg = str(e).replace('_', r'\_').replace('*', r'\*').replace('`', r'\`')
+            await send_message_callback(chat_id, f"⚠️ **Ошибка парсинга плана Агента #2:** {escaped_error_msg}\nRaw output: ```{orchestration_plan_raw}```", parse_mode='Markdown')
             logger.error(f"Agent 2 JSON parsing error: {e}, Raw output: {orchestration_plan_raw}")
             return
         except ValueError as e:
-            await send_message_callback(chat_id, f"⚠️ **Ошибка структуры плана Агента #2:** {e}", parse_mode='Markdown')
+            escaped_error_msg = str(e).replace('_', r'\_').replace('*', r'\*').replace('`', r'\`')
+            await send_message_callback(chat_id, f"⚠️ **Ошибка структуры плана Агента #2:** {escaped_error_msg}", parse_mode='Markdown')
             logger.error(f"Agent 2 plan structure error: {e}")
             return
 
     except Exception as e:
-        await send_message_callback(chat_id, f"⚠️ **Ошибка Агента #2:** {e}", parse_mode='Markdown')
+        escaped_error_msg = str(e).replace('_', r'\_').replace('*', r'\*').replace('`', r'\`')
+        await send_message_callback(chat_id, f"⚠️ **Ошибка Агента #2:** {escaped_error_msg}", parse_mode='Markdown')
         logger.exception("Agent 2 failed.")
         return
 
@@ -201,7 +208,8 @@ async def run_full_agent_process(user_query: str, chat_id: int, send_message_cal
             await send_message_callback(chat_id, f"✅ **{agent_label} завершил работу.**", parse_mode='Markdown')
             return result.get('output', f"Не удалось получить результат от {agent_label}.")
         except Exception as e:
-            await send_message_callback(chat_id, f"⚠️ **Ошибка {agent_label}:** {e}", parse_mode='Markdown')
+            escaped_error_msg = str(e).replace('_', r'\_').replace('*', r'\*').replace('`', r'\`')
+            await send_message_callback(chat_id, f"⚠️ **Ошибка {agent_label}:** {escaped_error_msg}", parse_mode='Markdown')
             logger.exception(f"{agent_label} failed.")
             return f"Error: {e}"
 
@@ -222,7 +230,8 @@ async def run_full_agent_process(user_query: str, chat_id: int, send_message_cal
             agent4_res = "Результат Агента #4 недоступен из-за ошибки."
 
     except Exception as e:
-        await send_message_callback(chat_id, f"⚠️ **Ошибка при параллельном выполнении Агентов #3/#4:** {e}", parse_mode='Markdown')
+        escaped_error_msg = str(e).replace('_', r'\_').replace('*', r'\*').replace('`', r'\`')
+        await send_message_callback(chat_id, f"⚠️ **Ошибка при параллельном выполнении Агентов #3/#4:** {escaped_error_msg}", parse_mode='Markdown')
         logger.exception("Parallel execution of Agents 3/4 failed.")
         return
 
@@ -246,8 +255,15 @@ async def run_full_agent_process(user_query: str, chat_id: int, send_message_cal
         await send_message_callback(chat_id, "✅ **Финальный отчет готов!**", parse_mode='Markdown')
         await send_message_callback(chat_id, final_report, parse_mode='Markdown')
     except Exception as e:
-        await send_message_callback(chat_id, f"⚠️ **Ошибка Агента #6:** {e}", parse_mode='Markdown')
+        escaped_error_msg = str(e).replace('_', r'\_').replace('*', r'\*').replace('`', r'\`')
+        await send_message_callback(chat_id, f"⚠️ **Ошибка Агента #6:** {escaped_error_msg}", parse_mode='Markdown')
         logger.exception("Agent 6 failed.")
+        
+        try:
+            await send_message_callback(chat_id, "⚠️ Ошибка при создании финального отчета (подробнее в логах сервера).", parse_mode=None)
+        except Exception as e_plain:
+            logger.error(f"Failed to send plain error message to Telegram: {e_plain}")
+            
         return
 
     await send_message_callback(chat_id, "\n✨ **Процесс завершен!**", parse_mode='Markdown')
