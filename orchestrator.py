@@ -43,9 +43,6 @@ class TelegramCallbackHandler(BaseCallbackHandler):
         await self.send_message_callback(self.chat_id, f"✅ *Инструмент завершил работу.* Результат (обрезано): `{truncated_output}`", parse_mode='Markdown')
 
     async def on_agent_finish(self, finish: Any, **kwargs: Any) -> Any:
-        # Этот коллбэк для внутренних мыслей агента или финального ответа.
-        # Финальный ответ агента обычно обрабатывается в main Orchestrator-логике.
-        # Здесь можно добавить логирование, если нужно.
         pass
 
 
@@ -58,45 +55,33 @@ async def create_agent_from_config(agent_id: str, telegram_callback_handler: Tel
         logger.error(f"Agent configuration for '{agent_id}' not found.")
         return None
 
-    # Создаем LLM на основе конфигурации.
-    # Для Агентов 3 и 4 (которые теперь OpenRouter) мы привязываем инструменты (web_search) к их LLM.
     llm = llm_integration.get_llm(
         provider=config['llm_provider'],
         model_name=config['llm_model'],
-        # Передаем agent_id только для провайдера 'hyperbolic',
-        # так как только для него нужен специфичный ключ из `self.hyperbolic_api_keys`
         agent_id=config['id'] if config['llm_provider'] == 'hyperbolic' else None,
-        # Привязываем инструменты к LLM Агентов 3 и 4,
-        # так как они будут AgentExecutor'ами, использующими web_search
         bind_tools=(agent_id in ["agent3_hyper2", "agent4_hyper3"]) 
     )
 
-    # Base prompt for AgentExecutor (A3, A4)
     base_agent_prompt = ChatPromptTemplate.from_messages(
         [
-            ("system", config['system_prompt']), # Initial system prompt from DB
-            MessagesPlaceholder("chat_history", optional=True), # Для сохранения истории, если потребуется
+            ("system", config['system_prompt']),
+            MessagesPlaceholder("chat_history", optional=True),
             ("human", "{input}"),
-            MessagesPlaceholder("agent_scratchpad"), # Для внутренних мыслей агента в AgentExecutor
+            MessagesPlaceholder("agent_scratchpad"),
         ]
     )
     
-    # Агенты 3 и 4 являются LangChain AgentExecutor'ами, т.к. их LLM (OpenRouter) поддерживает tool_calling.
     if agent_id in ["agent3_hyper2", "agent4_hyper3"]:
-        # Создаем AgentExecutor, который будет использовать LLM с привязанными инструментами
         agent = create_tool_calling_agent(llm, ALL_TOOLS, base_agent_prompt)
         executor = AgentExecutor(
             agent=agent,
-            tools=ALL_TOOLS, # Передаем список доступных инструментов
-            verbose=True, # Включаем логирование в консоль
+            tools=ALL_TOOLS,
+            verbose=True,
             handle_parsing_errors=True,
             callbacks=[telegram_callback_handler] if telegram_callback_handler else None
         )
         return executor
     else:
-        # Для агентов, которые просто генерируют текст без использования LangChain AgentExecutor
-        # (Агент 1, Агент 2, Агент 6)
-        # А также для Агента 5 (который является LLM, но не отдельным AgentExecutor в этой архитектуре)
         class SimpleChainWrapper:
             def __init__(self, llm_instance, system_prompt):
                 self.llm_instance = llm_instance
@@ -105,18 +90,14 @@ async def create_agent_from_config(agent_id: str, telegram_callback_handler: Tel
             async def ainvoke(self, input_data: Dict[str, Any]):
                 user_message = input_data.get('input', '')
                 
-                # Формируем список сообщений для LLM
-                # LangChain.ChatOpenAI (и другие ChatModel) и наш HyperbolicLLM ожидают list of BaseMessage
                 messages_for_llm: List[Any] = [SystemMessage(content=self.system_prompt), HumanMessage(content=user_message)]
 
                 if hasattr(self.llm_instance, 'generate'): # For our custom HyperbolicLLM
-                    response_content = await self.llm_instance.generate(messages_for_llm) # Pass list of messages
+                    response_content = await self.llm_instance.generate(messages_for_llm)
                     return {"output": response_content}
                 else: # For LangChain ChatOpenAI LLM and Nous LLM
-                    # LangChain ChatModel.ainvoke для простого текстового вывода может принимать dict с ключом "messages"
-                    # или просто список BaseMessage.
-                    # Для большинства актуальных версий LC, {"messages": messages_list} - это надежный способ.
-                    response = await self.llm_instance.ainvoke({"messages": messages_for_llm}) 
+                    # ИЗМЕНЕНО ЗДЕСЬ: Передаем список BaseMessage напрямую
+                    response = await self.llm_instance.ainvoke(messages_for_llm) # <-- ИЗМЕНЕНО
                     return {"output": response.content}
 
         return SimpleChainWrapper(llm, config['system_prompt'])
@@ -209,8 +190,6 @@ async def run_full_agent_process(user_query: str, chat_id: int, send_message_cal
         """Вспомогательная функция для запуска агентов-исследователей."""
         await send_message_callback(chat_id, f"🔍 **{agent_label}** начинает исследование...", parse_mode='Markdown')
         try:
-            # Agent Executor ожидает 'input' для своего промпта.
-            # Объединяем системный промпт от Агента #2 и запрос для выполнения в один 'input'.
             combined_input = (
                 f"### Ваша задача и инструкции: ###\n"
                 f"{task_config['system_prompt']}\n\n"
@@ -231,7 +210,7 @@ async def run_full_agent_process(user_query: str, chat_id: int, send_message_cal
         results = await asyncio.gather(
             run_research_agent(agent3_executor, agent3_task, "Агент #3"),
             run_research_agent(agent4_executor, agent4_task, "Агент #4"),
-            return_exceptions=True # Это позволяет одной задаче упасть, не прекращая остальные
+            return_exceptions=True
         )
         agent3_res, agent4_res = results
 
