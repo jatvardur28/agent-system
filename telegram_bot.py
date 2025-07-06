@@ -7,6 +7,7 @@ from telegram import Update
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters, ContextTypes
 )
+from telegram.constants import ParseMode # <-- ДОБАВЛЕНО для явного использования ParseMode
 
 # Импортируем модули
 import database
@@ -28,7 +29,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Привет! Я агентская система для поиска и анализа информации. "
         "Отправь мне свой запрос, чтобы начать.\n\n"
-        "Я буду кратко транслировать весь путь выполнения задачи."
+        "Я буду кратко транслировать весь путь выполнения задачи.",
+        parse_mode=ParseMode.MARKDOWN_V2 # Убедимся, что Markdown всегда используется
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -40,10 +42,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # Запускаем оркестратор в отдельной задаче, чтобы бот не зависал
     # Передаем context.bot.send_message как callback для отправки промежуточных сообщений
-    # Это важно, так как context.bot.send_message явно принимает chat_id как первый аргумент.
     asyncio.create_task(
         orchestrator.run_full_agent_process(user_query, chat_id, context.bot.send_message)
     )
+    # Первое сообщение пользователю, что запрос принят
     await update.message.reply_text("Ваш запрос принят в работу. Пожалуйста, ожидайте, это может занять некоторое время...")
 
 
@@ -56,8 +58,19 @@ def main() -> None:
         print("Ошибка: TELEGRAM_BOT_TOKEN не установлен. Пожалуйста, проверьте файл .env")
         return
 
-    application = Application.builder().token(token).build()
-
+    # ИЗМЕНЕНИЕ ЗДЕСЬ: Увеличиваем таймаут для HTTP-запросов к Telegram API
+    # read_timeout - таймаут на чтение ответа сервера
+    # write_timeout - таймаут на отправку запроса
+    application = (
+        Application.builder()
+        .token(token)
+        .http_version("1.1") # Рекомендуется для python-telegram-bot с httpx
+        .arbitrary_callback_data(True) # Если используете inline кнопки, это может быть полезно
+        .read_timeout(180) # <-- УВЕЛИЧЕНО до 3 минут
+        .write_timeout(180) # <-- УВЕЛИЧЕНО до 3 минут
+        .build()
+    )
+    
     # Добавляем обработчики команд
     application.add_handler(CommandHandler("start", start))
 
