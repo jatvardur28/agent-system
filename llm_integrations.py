@@ -13,10 +13,10 @@ load_dotenv() # Загружаем переменные окружения
 class LLMIntegration:
     def __init__(self):
         self.hyperbolic_api_keys = {
-            "hyper0": os.getenv("HYPERBOLIC_API_KEY_0"),
-            "hyper1": os.getenv("HYPERBOLIC_API_KEY_1"),
-            "hyper2": os.getenv("HYPERBOLIC_API_KEY_2"),
-            "hyper3": os.getenv("HYPERBOLIC_API_KEY_3"),
+            "agent1_hyper0": os.getenv("HYPERBOLIC_API_KEY_0"), # <-- Вот здесь должно быть "agent1_hyper0"
+            "agent2_hyper1": os.getenv("HYPERBOLIC_API_KEY_1"), # <-- Вот здесь "agent2_hyper1"
+            "agent3_hyper2": os.getenv("HYPERBOLIC_API_KEY_2"), # <-- Вот здесь "agent3_hyper2"
+            "agent4_hyper3": os.getenv("HYPERBOLIC_API_KEY_3"), # <-- Вот здесь "agent4_hyper3"
         }
         self.openrouter_api_key = os.getenv("OPENROUTER_API_KEY")
         self.nousresearch_api_key = os.getenv("NOUSRESEARCH_API_KEY")
