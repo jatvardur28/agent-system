@@ -7,6 +7,7 @@ from typing import Dict, Any
 from langchain.agents import AgentExecutor, create_tool_calling_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.callbacks import BaseCallbackHandler # <-- ДОБАВЛЕНО
 
 from llm_integrations import LLMIntegration
 from search_tool import ALL_TOOLS # Список инструментов (только web_search)
@@ -16,17 +17,17 @@ logger = logging.getLogger(__name__)
 
 llm_integration = LLMIntegration()
 
-class TelegramCallbackHandler:
+class TelegramCallbackHandler(BaseCallbackHandler): # <-- ИЗМЕНЕНО
     """
     Коллбэк-обработчик для LangChain, который отправляет информацию о действиях агента в Telegram.
     """
     def __init__(self, chat_id: int, send_message_callback):
+        super().__init__() # <-- ДОБАВЛЕНО
         self.chat_id = chat_id
         self.send_message_callback = send_message_callback
 
     async def on_agent_action(self, action: Any, **kwargs: Any) -> Any:
         # Логируем действия агента (что он решил сделать)
-        # Если action.log слишком длинный, можно его обрезать
         log_message = action.log
         if len(log_message) > 500:
             log_message = log_message[:497] + "..."
@@ -42,9 +43,6 @@ class TelegramCallbackHandler:
         await self.send_message_callback(self.chat_id, f"✅ *Инструмент завершил работу.* Результат (обрезано): `{truncated_output}`", parse_mode='Markdown')
 
     async def on_agent_finish(self, finish: Any, **kwargs: Any) -> Any:
-        # Этот коллбэк для внутренних мыслей агента или финального ответа.
-        # Финальный ответ агента обычно обрабатывается в main Orchestrator-логике.
-        # Здесь можно добавить логирование, если нужно.
         pass
 
 
@@ -57,44 +55,33 @@ async def create_agent_from_config(agent_id: str, telegram_callback_handler: Tel
         logger.error(f"Agent configuration for '{agent_id}' not found.")
         return None
 
-    # Создаем LLM на основе конфигурации.
-    # Для Агентов 3 и 4 (которые теперь OpenRouter) мы привязываем инструменты (web_search) к их LLM.
     llm = llm_integration.get_llm(
         provider=config['llm_provider'],
         model_name=config['llm_model'],
-        # Передаем agent_id только для провайдера 'hyperbolic',
-        # так как только для него нужен специфичный ключ из `self.hyperbolic_api_keys`
         agent_id=config['id'] if config['llm_provider'] == 'hyperbolic' else None,
-        # Привязываем инструменты к LLM Агентов 3 и 4,
-        # так как они будут AgentExecutor'ами, использующими web_search
         bind_tools=(agent_id in ["agent3_hyper2", "agent4_hyper3"]) 
     )
 
     prompt = ChatPromptTemplate.from_messages(
         [
             ("system", config['system_prompt']),
-            MessagesPlaceholder("chat_history", optional=True), # Для сохранения истории, если потребуется
+            MessagesPlaceholder("chat_history", optional=True),
             ("human", "{input}"),
-            MessagesPlaceholder("agent_scratchpad"), # Для внутренних мыслей агента в AgentExecutor
+            MessagesPlaceholder("agent_scratchpad"),
         ]
     )
     
-    # Агенты 3 и 4 являются LangChain AgentExecutor'ами, т.к. их LLM (OpenRouter) поддерживает tool_calling.
     if agent_id in ["agent3_hyper2", "agent4_hyper3"]:
-        # Создаем AgentExecutor, который будет использовать LLM с привязанными инструментами
         agent = create_tool_calling_agent(llm, ALL_TOOLS, prompt)
         executor = AgentExecutor(
             agent=agent,
-            tools=ALL_TOOLS, # Передаем список доступных инструментов
-            verbose=True, # Включаем логирование в консоль
+            tools=ALL_TOOLS,
+            verbose=True,
             handle_parsing_errors=True,
             callbacks=[telegram_callback_handler] if telegram_callback_handler else None
         )
         return executor
     else:
-        # Для агентов, которые просто генерируют текст без использования LangChain AgentExecutor
-        # (Агент 1, Агент 2, Агент 6)
-        # А также для Агента 5 (который является LLM, но не отдельным AgentExecutor в этой архитектуре)
         class SimpleChainWrapper:
             def __init__(self, llm_instance, system_prompt):
                 self.llm_instance = llm_instance
@@ -104,16 +91,14 @@ async def create_agent_from_config(agent_id: str, telegram_callback_handler: Tel
                 user_message = input_data.get('input', '')
                 messages = [SystemMessage(content=self.system_prompt), HumanMessage(content=user_message)]
 
-                # Если это наш кастомный HyperbolicLLM, у него есть метод generate
                 if hasattr(self.llm_instance, 'generate'):
                     response_content = await self.llm_instance.generate(
                         [{"role": "system", "content": self.system_prompt}, {"role": "user", "content": user_message}]
                     )
                     return {"output": response_content}
-                # Иначе, это LangChain ChatOpenAI LLM
                 else:
                     response = await self.llm_instance.ainvoke(messages)
-                    return {"output": response.content} # LangChain ChatModel возвращает Content (str)
+                    return {"output": response.content}
 
         return SimpleChainWrapper(llm, config['system_prompt'])
 
@@ -154,10 +139,8 @@ async def run_full_agent_process(user_query: str, chat_id: int, send_message_cal
         orchestration_plan_raw = a2_result.get('output', "Не удалось получить план оркестрации.")
         
         try:
-            # ИЗМЕНЕНИЯ ЗДЕСЬ: Извлекаем JSON из Markdown блока
             clean_json_string = orchestration_plan_raw.strip()
             if clean_json_string.startswith("```json"):
-                # Ищем начало и конец блока JSON
                 json_start_tag = "```json\n"
                 json_end_tag = "\n```"
                 json_start_index = clean_json_string.find(json_start_tag)
@@ -166,10 +149,9 @@ async def run_full_agent_process(user_query: str, chat_id: int, send_message_cal
                 if json_start_index != -1 and json_end_index != -1 and json_end_index > (json_start_index + len(json_start_tag)):
                     clean_json_string = clean_json_string[json_start_index + len(json_start_tag) : json_end_index].strip()
                 else:
-                    # Если разметка присутствует, но неполная или некорректная, попробуем парсить как есть
                     logger.warning("Markdown JSON block found but could not be cleanly parsed. Attempting raw JSON load.")
             
-            orchestration_plan = json.loads(clean_json_string) # Используем очищенную строку
+            orchestration_plan = json.loads(clean_json_string)
 
             agent3_task = orchestration_plan.get('agent3_task')
             agent4_task = orchestration_plan.get('agent4_task')
@@ -197,8 +179,6 @@ async def run_full_agent_process(user_query: str, chat_id: int, send_message_cal
     # --- Шаг 3 & 4: Агенты №3 и №4 (Исследователи) в параллель ---
     await send_message_callback(chat_id, "\n🔄 **Агенты #3 и #4 (Исследователи)**: Запускаю параллельный поиск...", parse_mode='Markdown')
 
-    # Создаем AgentExecutor'ы для Агентов 3 и 4.
-    # Они будут использовать OpenRouter LLM, который имеет привязанный инструмент web_search.
     agent3_executor = await create_agent_from_config("agent3_hyper2", telegram_callback_handler)
     agent4_executor = await create_agent_from_config("agent4_hyper3", telegram_callback_handler)
 
@@ -210,8 +190,6 @@ async def run_full_agent_process(user_query: str, chat_id: int, send_message_cal
         """Вспомогательная функция для запуска агентов-исследователей."""
         await send_message_callback(chat_id, f"🔍 **{agent_label}** начинает исследование...", parse_mode='Markdown')
         try:
-            # Для AgentExecutor, мы можем динамически обновлять системный промпт
-            # (предполагая, что промпт в database.py является шаблоном)
             dynamic_prompt_messages = [
                 SystemMessage(content=task_config['system_prompt']),
                 MessagesPlaceholder("chat_history", optional=True),
@@ -233,7 +211,7 @@ async def run_full_agent_process(user_query: str, chat_id: int, send_message_cal
         results = await asyncio.gather(
             run_research_agent(agent3_executor, agent3_task, "Агент #3"),
             run_research_agent(agent4_executor, agent4_task, "Агент #4"),
-            return_exceptions=True # Чтобы не упасть, если один из них выдаст ошибку
+            return_exceptions=True
         )
         agent3_res, agent4_res = results
 
