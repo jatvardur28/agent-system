@@ -2,14 +2,15 @@
 import json
 import logging
 import asyncio
+# ИСПРАВЛЕНИЕ: Это полная и правильная строка импорта
 from typing import Dict, Any, List
+import httpx # Импортируем httpx для обработки его исключений
+from telegram.error import TimedOut, NetworkError # Импортируем конкретные ошибки Telegram
 
 from langchain.agents import AgentExecutor, create_tool_calling_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-# Импортируем все необходимые типы BaseMessage для явного преобразования
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
-# Также импортируем ChatOpenAI для проверки типа, как предложил Claude
-from langchain_openai import ChatOpenAI # <-- ДОБАВЛЕНО
+from langchain_openai import ChatOpenAI # Для проверки типа, как предложил Claude
 from langchain_core.callbacks import BaseCallbackHandler
 
 from llm_integrations import LLMIntegration
@@ -95,43 +96,27 @@ async def create_agent_from_config(agent_id: str, telegram_callback_handler: Tel
             async def ainvoke(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
                 user_message = input_data.get('input', '')
                 
-                # Формируем сообщения в виде списка словарей, как Claude предложил
-                raw_messages_dict_list = []
-                raw_messages_dict_list.append({"role": "system", "content": self.system_prompt})
-                raw_messages_dict_list.append({"role": "user", "content": user_message})
-                
-                # ИСПРАВЛЕНИЕ: Создаем объекты LangChain BaseMessage из списка словарей
-                messages_for_llm: List[Any] = []
-                for msg_dict in raw_messages_dict_list: # Итерируемся по словарям
-                    if msg_dict["role"] == "system":
-                        messages_for_llm.append(SystemMessage(content=msg_dict["content"]))
-                    elif msg_dict["role"] == "user":
-                        messages_for_llm.append(HumanMessage(content=msg_dict["content"]))
-                    elif msg_dict["role"] == "assistant":
-                        messages_for_llm.append(AIMessage(content=msg_dict["content"]))
-                    # Можно добавить обработку tool_message, если они будут использоваться в этом потоке
-                    elif msg_dict["role"] == "tool":
-                        messages_for_llm.append(ToolMessage(content=msg_dict["content"], tool_call_id=msg_dict.get("tool_call_id", "unknown")))
-                    else:
-                        logger.warning(f"Unsupported message role in raw_messages_dict_list: {msg_dict.get('role', 'N/A')}. Treating as HumanMessage.")
-                        messages_for_llm.append(HumanMessage(content=str(msg_dict.get("content", ""))))
+                # ИСПРАВЛЕНИЕ: Создаем список объектов LangChain BaseMessage вручную
+                # Это гарантирует правильный формат для любого LLM (HyperbolicLLM или ChatOpenAI)
+                messages_for_llm: List[Any] = [
+                    SystemMessage(content=self.system_prompt),
+                    HumanMessage(content=user_message)
+                ]
 
-                # Используем правильный метод в зависимости от типа LLM (как предложил Claude)
-                if isinstance(self.llm_instance, ChatOpenAI): # Для ChatOpenAI (Agent 6)
+                # Используем правильный метод в зависимости от типа LLM
+                if isinstance(self.llm_instance, ChatOpenAI): # Если это LangChain ChatOpenAI LLM (Agent 6)
                     response = await self.llm_instance.ainvoke(messages_for_llm)
                     response_content = response.content
                 elif hasattr(self.llm_instance, 'generate'): # Для нашего кастомного HyperbolicLLM (Agent 1, 2)
                     response_content = await self.llm_instance.generate(messages_for_llm)
-                else: # Fallback (не должно срабатывать, но на всякий случай)
+                else: # Fallback для других типов LLM, если появятся (крайне маловероятно здесь)
                     logger.warning(f"Unknown LLM instance type for SimpleChainWrapper: {type(self.llm_instance)}. Attempting ainvoke.")
                     try:
                         response = await self.llm_instance.ainvoke(messages_for_llm)
                         response_content = response.content
                     except Exception as e:
-                        logger.error(f"Fallback ainvoke failed, attempting generate: {e}")
-                        # Это может быть специфично для вашей версии LangChain
-                        response = await self.llm_instance.generate(messages_for_llm)
-                        response_content = response.generations[0][0].text # LangChain LLM.generate возвращает LLMResult
+                        logger.error(f"Fallback ainvoke failed, re-raising: {e}")
+                        raise # Чтобы не скрывать ошибку, если и это не сработает
                 
                 return {"output": response_content}
 
@@ -144,30 +129,50 @@ async def run_full_agent_process(user_query: str, chat_id: int, send_message_cal
     """
     telegram_callback_handler = TelegramCallbackHandler(chat_id, send_message_callback)
 
-    await send_message_callback(chat_id, "🚀 **Инициирую процесс поиска и анализа...**\n\n", parse_mode='Markdown')
+    # Вспомогательная функция для отправки сообщения с ретраями
+    async def resilient_send_message(message_text: str, parse_mode: str = 'Markdown', retries: int = 3, delay: int = 5):
+        for attempt in range(retries):
+            try:
+                await send_message_callback(chat_id, message_text, parse_mode=parse_mode)
+                return
+            except (TimedOut, NetworkError) as e:
+                logger.warning(f"Telegram send failed (attempt {attempt+1}/{retries}): {e}. Retrying in {delay}s...")
+                await asyncio.sleep(delay)
+            except Exception as e:
+                logger.error(f"Failed to send message to Telegram: {e}", exc_info=True)
+                break
+        logger.error(f"Failed to send message to Telegram after {retries} attempts: {message_text}")
+
+
+    await resilient_send_message("🚀 **Инициирую процесс поиска и анализа...**\n\n")
 
     # --- Шаг 1: Агент №1 (Промпт-трансформер) ---
-    await send_message_callback(chat_id, "🤖 **Агент #1 (Промпт-трансформер)**: Преобразую ваш запрос...", parse_mode='Markdown')
+    await resilient_send_message("🤖 **Агент #1 (Промпт-трансформер)**: Преобразую ваш запрос...")
     agent1 = await create_agent_from_config("agent1_hyper0", telegram_callback_handler)
     if not agent1:
-        await send_message_callback(chat_id, "❌ Ошибка: Агент #1 не найден или не настроен.")
+        await resilient_send_message("❌ Ошибка: Агент #1 не найден или не настроен.")
         return
 
     try:
         a1_result = await agent1.ainvoke({"input": user_query})
         refined_query = a1_result.get('output', "Не удалось уточнить запрос.")
-        await send_message_callback(chat_id, f"📝 **Агент #1 завершил.** Уточненный запрос:\n```\n{refined_query}\n```", parse_mode='Markdown')
+        await resilient_send_message(f"📝 **Агент #1 завершил.** Уточненный запрос:\n```\n{refined_query}\n```")
+    except (httpx.TimeoutException, httpx.RequestError, TimedOut, NetworkError) as e:
+        escaped_error_msg = str(e).replace('_', r'\_').replace('*', r'\*').replace('`', r'\`')
+        await resilient_send_message(f"⚠️ **Ошибка Агента #1 (Таймаут/Сеть):** {escaped_error_msg}")
+        logger.exception("Agent 1 failed due to timeout/network.")
+        return
     except Exception as e:
         escaped_error_msg = str(e).replace('_', r'\_').replace('*', r'\*').replace('`', r'\`')
-        await send_message_callback(chat_id, f"⚠️ **Ошибка Агента #1:** {escaped_error_msg}", parse_mode='Markdown')
+        await resilient_send_message(f"⚠️ **Ошибка Агента #1:** {escaped_error_msg}")
         logger.exception("Agent 1 failed.")
         return
 
     # --- Шаг 2: Агент №2 (Оркестратор) ---
-    await send_message_callback(chat_id, "\n🤖 **Агент #2 (Оркестратор)**: Планирую задачи для исследователей...", parse_mode='Markdown')
+    await resilient_send_message("\n🤖 **Агент #2 (Оркестратор)**: Планирую задачи для исследователей...")
     agent2 = await create_agent_from_config("agent2_hyper1", telegram_callback_handler)
     if not agent2:
-        await send_message_callback(chat_id, "❌ Ошибка: Агент #2 не найден или не настроен.")
+        await resilient_send_message("❌ Ошибка: Агент #2 не найден или не настроен.")
         return
     
     try:
@@ -178,7 +183,7 @@ async def run_full_agent_process(user_query: str, chat_id: int, send_message_cal
             clean_json_string = orchestration_plan_raw.strip()
             # Удаляем внешние экранированные скобки {{}} ИЛИ Markdown-блок ```json
             if clean_json_string.startswith("{{") and clean_json_string.endswith("}}"):
-                clean_json_string = clean_json_string[1:-1].strip() # Обрезаем {{ и }}
+                clean_json_string = clean_json_string[1:-1].strip()
             
             if clean_json_string.startswith("```json"):
                 json_start_tag = "```json\n"
@@ -199,39 +204,44 @@ async def run_full_agent_process(user_query: str, chat_id: int, send_message_cal
             if not agent3_task or not agent4_task:
                 raise ValueError("Parsed plan is missing 'agent3_task' or 'agent4_task'. Check Agent #2's output format.")
 
-            await send_message_callback(chat_id, f"📋 **Агент #2 завершил.** План сформирован для Агентов #3 и #4.", parse_mode='Markdown')
+            await resilient_send_message(f"📋 **Агент #2 завершил.** План сформирован для Агентов #3 и #4.")
             logger.info(f"Agent 2 output plan: {orchestration_plan}")
 
         except json.JSONDecodeError as e:
             escaped_error_msg = str(e).replace('_', r'\_').replace('*', r'\*').replace('`', r'\`')
-            await send_message_callback(chat_id, f"⚠️ **Ошибка парсинга плана Агента #2:** {escaped_error_msg}\nRaw output: ```{orchestration_plan_raw}```", parse_mode='Markdown')
+            await resilient_send_message(f"⚠️ **Ошибка парсинга плана Агента #2:** {escaped_error_msg}\nRaw output: ```{orchestration_plan_raw}```")
             logger.error(f"Agent 2 JSON parsing error: {e}, Raw output: {orchestration_plan_raw}")
             return
         except ValueError as e:
             escaped_error_msg = str(e).replace('_', r'\_').replace('*', r'\*').replace('`', r'\`')
-            await send_message_callback(chat_id, f"⚠️ **Ошибка структуры плана Агента #2:** {escaped_error_msg}", parse_mode='Markdown')
+            await resilient_send_message(f"⚠️ **Ошибка структуры плана Агента #2:** {escaped_error_msg}")
             logger.error(f"Agent 2 plan structure error: {e}")
             return
 
+    except (httpx.TimeoutException, httpx.RequestError, TimedOut, NetworkError) as e:
+        escaped_error_msg = str(e).replace('_', r'\_').replace('*', r'\*').replace('`', r'\`')
+        await resilient_send_message(f"⚠️ **Ошибка Агента #2 (Таймаут/Сеть):** {escaped_error_msg}")
+        logger.exception("Agent 2 failed due to timeout/network.")
+        return
     except Exception as e:
         escaped_error_msg = str(e).replace('_', r'\_').replace('*', r'\*').replace('`', r'\`')
-        await send_message_callback(chat_id, f"⚠️ **Ошибка Агента #2:** {escaped_error_msg}", parse_mode='Markdown')
+        await resilient_send_message(f"⚠️ **Ошибка Агента #2:** {escaped_error_msg}")
         logger.exception("Agent 2 failed.")
         return
 
     # --- Шаг 3 & 4: Агенты №3 и №4 (Исследователи) в параллель ---
-    await send_message_callback(chat_id, "\n🔄 **Агенты #3 и #4 (Исследователи)**: Запускаю параллельный поиск...", parse_mode='Markdown')
+    await resilient_send_message("\n🔄 **Агенты #3 и #4 (Исследователи)**: Запускаю параллельный поиск...")
 
     agent3_executor = await create_agent_from_config("agent3_hyper2", telegram_callback_handler)
     agent4_executor = await create_agent_from_config("agent4_hyper3", telegram_callback_handler)
 
     if not agent3_executor or not agent4_executor:
-        await send_message_callback(chat_id, "❌ Ошибка: Один из исследовательских агентов не найден/не настроен.")
+        await resilient_send_message("❌ Ошибка: Один из исследовательских агентов не найден/не настроен.")
         return
 
     async def run_research_agent(executor, task_config, agent_label):
         """Вспомогательная функция для запуска агентов-исследователей."""
-        await send_message_callback(chat_id, f"🔍 **{agent_label}** начинает исследование...", parse_mode='Markdown')
+        await resilient_send_message(f"🔍 **{agent_label}** начинает исследование...")
         try:
             combined_input = (
                 f"### Ваша задача и инструкции: ###\n"
@@ -241,11 +251,16 @@ async def run_full_agent_process(user_query: str, chat_id: int, send_message_cal
             )
             
             result = await executor.ainvoke({"input": combined_input})
-            await send_message_callback(chat_id, f"✅ **{agent_label} завершил работу.**", parse_mode='Markdown')
+            await resilient_send_message(f"✅ **{agent_label} завершил работу.**")
             return result.get('output', f"Не удалось получить результат от {agent_label}.")
+        except (httpx.TimeoutException, httpx.RequestError, TimedOut, NetworkError) as e:
+            escaped_error_msg = str(e).replace('_', r'\_').replace('*', r'\*').replace('`', r'\`')
+            await resilient_send_message(f"⚠️ **Ошибка {agent_label} (Таймаут/Сеть):** {escaped_error_msg}")
+            logger.exception(f"{agent_label} failed due to timeout/network.")
+            return f"Error: {e}"
         except Exception as e:
             escaped_error_msg = str(e).replace('_', r'\_').replace('*', r'\*').replace('`', r'\`')
-            await send_message_callback(chat_id, f"⚠️ **Ошибка {agent_label}:** {escaped_error_msg}", parse_mode='Markdown')
+            await resilient_send_message(f"⚠️ **Ошибка {agent_label}:** {escaped_error_msg}")
             logger.exception(f"{agent_label} failed.")
             return f"Error: {e}"
 
@@ -259,23 +274,23 @@ async def run_full_agent_process(user_query: str, chat_id: int, send_message_cal
         agent3_res, agent4_res = results
 
         if isinstance(agent3_res, Exception):
-            await send_message_callback(chat_id, f"❌ **Агент #3 потерпел сбой:** {agent3_res}", parse_mode='Markdown')
+            await resilient_send_message(f"❌ **Агент #3 потерпел сбой:** {agent3_res}")
             agent3_res = "Результат Агента #3 недоступен из-за ошибки."
         if isinstance(agent4_res, Exception):
-            await send_message_callback(chat_id, f"❌ **Агент #4 потерпел сбой:** {agent4_res}", parse_mode='Markdown')
+            await resilient_send_message(f"❌ **Агент #4 потерпел сбой:** {agent4_res}")
             agent4_res = "Результат Агента #4 недоступен из-за ошибки."
 
     except Exception as e:
         escaped_error_msg = str(e).replace('_', r'\_').replace('*', r'\*').replace('`', r'\`')
-        await send_message_callback(chat_id, f"⚠️ **Ошибка при параллельном выполнении Агентов #3/#4:** {escaped_error_msg}", parse_mode='Markdown')
+        await resilient_send_message(f"⚠️ **Ошибка при параллельном выполнении Агентов #3/#4:** {escaped_error_msg}")
         logger.exception("Parallel execution of Agents 3/4 failed.")
         return
 
     # --- Шаг 6: Агент №6 (Финальный Аналитик) ---
-    await send_message_callback(chat_id, "\n🧠 **Агент #6 (Финальный Аналитик)**: Объединяю и синтезирую результаты...", parse_mode='Markdown')
+    await resilient_send_message("\n🧠 **Агент #6 (Финальный Аналитик)**: Объединяю и синтезирую результаты...")
     agent6 = await create_agent_from_config("agent6_nous0", telegram_callback_handler)
     if not agent6:
-        await send_message_callback(chat_id, "❌ Ошибка: Агент #6 не найден или не настроен.")
+        await resilient_send_message("❌ Ошибка: Агент #6 не найден или не настроен.")
         return
 
     final_analysis_input = (
@@ -288,18 +303,23 @@ async def run_full_agent_process(user_query: str, chat_id: int, send_message_cal
     try:
         a6_result = await agent6.ainvoke({"input": final_analysis_input})
         final_report = a6_result.get('output', "Не удалось получить финальный отчет.")
-        await send_message_callback(chat_id, "✅ **Финальный отчет готов!**", parse_mode='Markdown')
-        await send_message_callback(chat_id, final_report, parse_mode='Markdown')
+        await resilient_send_message("✅ **Финальный отчет готов!**")
+        await resilient_send_message(final_report)
+    except (httpx.TimeoutException, httpx.RequestError, TimedOut, NetworkError) as e:
+        escaped_error_msg = str(e).replace('_', r'\_').replace('*', r'\*').replace('`', r'\`')
+        await resilient_send_message(f"⚠️ **Ошибка Агента #6 (Таймаут/Сеть):** {escaped_error_msg}")
+        logger.exception("Agent 6 failed due to timeout/network.")
+        return
     except Exception as e:
         escaped_error_msg = str(e).replace('_', r'\_').replace('*', r'\*').replace('`', r'\`')
-        await send_message_callback(chat_id, f"⚠️ **Ошибка Агента #6:** {escaped_error_msg}", parse_mode='Markdown')
+        await resilient_send_message(f"⚠️ **Ошибка Агента #6:** {escaped_error_msg}")
         logger.exception("Agent 6 failed.")
         
         try:
-            await send_message_callback(chat_id, "⚠️ Ошибка при создании финального отчета (подробнее в логах сервера).", parse_mode=None)
+            await resilient_send_message("⚠️ Ошибка при создании финального отчета (подробнее в логах сервера).", parse_mode=None)
         except Exception as e_plain:
             logger.error(f"Failed to send plain error message to Telegram: {e_plain}")
             
         return
 
-    await send_message_callback(chat_id, "\n✨ **Процесс завершен!**", parse_mode='Markdown')
+    await resilient_send_message("\n✨ **Процесс завершен!**")
