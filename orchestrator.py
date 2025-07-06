@@ -92,15 +92,15 @@ async def create_agent_from_config(agent_id: str, telegram_callback_handler: Tel
             async def ainvoke(self, input_data: Dict[str, Any]):
                 user_message = input_data.get('input', '')
                 
-                # Для HyperbolicLLM, который ожидает List[BaseMessage] для своего generate метода
-                if hasattr(self.llm_instance, 'generate'):
-                    messages_for_llm: List[Any] = [SystemMessage(content=self.system_prompt), HumanMessage(content=user_message)]
+                # Формируем список сообщений для LLM
+                messages_for_llm: List[Any] = [SystemMessage(content=self.system_prompt), HumanMessage(content=user_message)]
+
+                if hasattr(self.llm_instance, 'generate'): # For our custom HyperbolicLLM
                     response_content = await self.llm_instance.generate(messages_for_llm)
                     return {"output": response_content}
                 else: # For LangChain ChatOpenAI LLM and Nous LLM (теперь OpenRouter)
-                    # ИЗМЕНЕНО: Передаем весь промпт как одну строку, чтобы обойти ошибку типов
-                    combined_prompt_string = f"Системная инструкция: {self.system_prompt}\n\nПользовательский ввод: {user_message}"
-                    response = await self.llm_instance.ainvoke(combined_prompt_string) # <-- ИЗМЕНЕНО
+                    # Возвращаемся к прямому списку сообщений, что должно быть стабильно с зафиксированными версиями
+                    response = await self.llm_instance.ainvoke(messages_for_llm) # <-- ИЗМЕНЕНО: Прямо список BaseMessage
                     return {"output": response.content}
 
         return SimpleChainWrapper(llm, config['system_prompt'])
