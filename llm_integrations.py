@@ -5,7 +5,8 @@ from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 import logging
 from search_tool import web_search
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage # Импортируем типы сообщений LangChain
+# Импортируем все необходимые классы сообщений из LangChain Core
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +15,7 @@ load_dotenv()
 class LLMIntegration:
     def __init__(self):
         self.hyperbolic_api_keys = {
+            # Имена ключей здесь ДОЛЖНЫ совпадать с agent_id, которые используются в database.py и orchestrator.py
             "agent1_hyper0": os.getenv("HYPERBOLIC_API_KEY_0"),
             "agent2_hyper1": os.getenv("HYPERBOLIC_API_KEY_1"),
             "agent3_hyper2": os.getenv("HYPERBOLIC_API_KEY_2"),
@@ -39,7 +41,7 @@ class LLMIntegration:
 
                 async def generate(self, messages): # `messages` здесь - это список объектов LangChain BaseMessage
                     api_messages = []
-                    for msg in messages:
+                    for msg in messages: # <-- ИСПРАВЛЕНИЕ ЗДЕСЬ: Теперь msg - это объект BaseMessage
                         if isinstance(msg, SystemMessage):
                             api_messages.append({"role": "system", "content": msg.content})
                         elif isinstance(msg, HumanMessage):
@@ -48,8 +50,6 @@ class LLMIntegration:
                                 api_messages.append({"role": "user", "content": msg.content})
                             elif isinstance(msg.content, list):
                                 # Преобразуем список частей контента в строку для текстового LLM
-                                # TODO: Если Hyperbolic поддерживает мультимодальность, здесь нужно сложнее.
-                                # Пока просто объединяем текстовые части.
                                 content_parts = []
                                 for part in msg.content:
                                     if isinstance(part, dict) and part.get("type") == "text":
@@ -58,7 +58,7 @@ class LLMIntegration:
                                 if content_parts:
                                     api_messages.append({"role": "user", "content": " ".join(content_parts)})
                                 else:
-                                    logger.warning(f"Unsupported multi-modal content in HumanMessage for HyperbolicLLM: {msg.content}")
+                                    logger.warning(f"Unsupported multi-modal content in HumanMessage for HyperbolicLLM: {msg.content}. Using string conversion.")
                                     api_messages.append({"role": "user", "content": str(msg.content)}) # Fallback
                             else:
                                 logger.warning(f"Unexpected HumanMessage content type: {type(msg.content)}. Converting to string.")
@@ -66,6 +66,8 @@ class LLMIntegration:
                         elif isinstance(msg, AIMessage):
                             api_messages.append({"role": "assistant", "content": msg.content})
                         elif isinstance(msg, ToolMessage): # Если агент должен будет обрабатывать ToolMessage
+                            # В ToolMessage content может быть str, а tool_call_id - str
+                            # Убедитесь, что ваш API LLM поддерживает ToolMessage в этом формате
                             api_messages.append({"role": "tool", "tool_call_id": msg.tool_call_id, "content": msg.content})
                         else:
                             logger.warning(f"Unsupported message type for Hyperbolic API: {type(msg)}. Converting to user message.")
@@ -102,7 +104,6 @@ class LLMIntegration:
                     except KeyError as e:
                         logger.error(f"Missing key in Hyperbolic API response: {e}. Response: {response_json}")
                         raise
-
 
             return HyperbolicLLM(model_name, api_key, temperature)
 
@@ -148,12 +149,11 @@ if __name__ == '__main__':
         except Exception as e:
             print(f"Error testing Hyperbolic LLM: {e}")
 
-        # Test OpenRouter LLM with tools (Agent 3/4 type)
+        # Test OpenRouter LLM with tool binding (Agent 3/4 type)
         try:
             print("\nTesting OpenRouter LLM with tool binding:")
             openrouter_llm_with_tool = llm_integration.get_llm("openrouter", "mistralai/mistral-7b-instruct-v0.2", bind_tools=True)
             print(f"OpenRouter LLM with tool initialized: {openrouter_llm_with_tool.tools}")
-            # You would typically test tool calling via AgentExecutor in orchestrator
         except Exception as e:
             print(f"Error testing OpenRouter LLM with tools: {e}")
             
@@ -165,7 +165,8 @@ if __name__ == '__main__':
                 SystemMessage(content="You are a helpful assistant."),
                 HumanMessage(content="Who is Alan Turing?")
             ]
-            nous_response = await nous_llm.ainvoke({"messages": test_messages}) # Use dict with messages key
+            # Для NousResearch (который является ChatOpenAI) напрямую передаем список сообщений
+            nous_response = await nous_llm.ainvoke(test_messages)
             print(f"NousResearch response: {nous_response.content}")
         except Exception as e:
             print(f"Error testing NousResearch LLM: {e}")
