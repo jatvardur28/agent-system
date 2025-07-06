@@ -1,3 +1,7 @@
+
+#### `orchestrator.py` (Обновлен `SimpleChainWrapper` и `run_research_agent` для AgentExecutor)
+
+```python
 # ~/ai_agent_system/orchestrator.py
 import json
 import logging
@@ -6,7 +10,7 @@ from typing import Dict, Any, List
 
 from langchain.agents import AgentExecutor, create_tool_calling_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage # Добавлен AIMessage
+from langchain_core.messages import SystemMessage, HumanMessage # Добавлен AIMessage
 from langchain_core.callbacks import BaseCallbackHandler
 
 from llm_integrations import LLMIntegration
@@ -61,8 +65,6 @@ async def create_agent_from_config(agent_id: str, telegram_callback_handler: Tel
     )
 
     # Base prompt for AgentExecutor (A3, A4)
-    # This prompt should be defined once, and the "system" part can be dynamically adjusted
-    # by passing it as part of the "input" for the agent.
     base_agent_prompt = ChatPromptTemplate.from_messages(
         [
             ("system", config['system_prompt']), # Initial system prompt from DB
@@ -73,10 +75,7 @@ async def create_agent_from_config(agent_id: str, telegram_callback_handler: Tel
     )
     
     if agent_id in ["agent3_hyper2", "agent4_hyper3"]:
-        # Create AgentExecutor. The LLM needs to support tool_calling.
-        # The prompt is set at creation and isn't easily modifiable later directly on agent.prompt.
-        # The dynamic system prompt from Agent 2 will be concatenated with the user's input.
-        agent = create_tool_calling_agent(llm, ALL_TOOLS, base_agent_prompt) # Use base_agent_prompt here
+        agent = create_tool_calling_agent(llm, ALL_TOOLS, base_agent_prompt)
         executor = AgentExecutor(
             agent=agent,
             tools=ALL_TOOLS,
@@ -94,17 +93,15 @@ async def create_agent_from_config(agent_id: str, telegram_callback_handler: Tel
             async def ainvoke(self, input_data: Dict[str, Any]):
                 user_message = input_data.get('input', '')
                 
-                # Format messages for LLM
-                # LangChain expects a list of BaseMessages for .ainvoke or .generate
+                # Формируем список сообщений для LLM
                 messages_for_llm: List[Any] = [SystemMessage(content=self.system_prompt), HumanMessage(content=user_message)]
 
                 if hasattr(self.llm_instance, 'generate'): # For our custom HyperbolicLLM
-                    response_content = await self.llm_instance.generate(
-                        [{"role": "system", "content": self.system_prompt}, {"role": "user", "content": user_message}]
-                    )
+                    response_content = await self.llm_instance.generate(messages_for_llm) # Pass list of messages
                     return {"output": response_content}
-                else: # For LangChain ChatOpenAI LLM
-                    response = await self.llm_instance.ainvoke(messages_for_llm) # Pass formatted messages
+                else: # For LangChain ChatOpenAI LLM and Nous LLM
+                    response = await self.llm_instance.ainvoke({"messages": messages_for_llm}) # LangChain expects dict with "messages" key
+                    # response = await self.llm_instance.ainvoke(messages_for_llm) # OR this, check which version of LangChain_core
                     return {"output": response.content}
 
         return SimpleChainWrapper(llm, config['system_prompt'])
@@ -197,11 +194,7 @@ async def run_full_agent_process(user_query: str, chat_id: int, send_message_cal
         """Вспомогательная функция для запуска агентов-исследователей."""
         await send_message_callback(chat_id, f"🔍 **{agent_label}** начинает исследование...", parse_mode='Markdown')
         try:
-            # Агент Executor ожидает 'input' для своего промпта.
-            # Динамический системный промпт от Агента #2 будет передан КАК часть input,
-            # либо мы ожидаем, что LLM достаточно умен, чтобы понять,
-            # что task_config['system_prompt'] является его основной директивой для этой задачи.
-            # Лучше всего объединить их в один 'input' для AgentExecutor.
+            # Agent Executor ожидает 'input' для своего промпта.
             combined_input = (
                 f"### Ваша задача и инструкции: ###\n"
                 f"{task_config['system_prompt']}\n\n"
@@ -209,7 +202,7 @@ async def run_full_agent_process(user_query: str, chat_id: int, send_message_cal
                 f"{task_config['instructional_query']}"
             )
             
-            result = await executor.ainvoke({"input": combined_input}) # Передаем объединенный ввод
+            result = await executor.ainvoke({"input": combined_input})
             await send_message_callback(chat_id, f"✅ **{agent_label} завершил работу.**", parse_mode='Markdown')
             return result.get('output', f"Не удалось получить результат от {agent_label}.")
         except Exception as e:
