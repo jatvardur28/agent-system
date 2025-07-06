@@ -1,3 +1,4 @@
+# ~/ai_agent_system/orchestrator.py
 import json
 import logging
 import asyncio
@@ -24,7 +25,12 @@ class TelegramCallbackHandler:
         self.send_message_callback = send_message_callback
 
     async def on_agent_action(self, action: Any, **kwargs: Any) -> Any:
-        await self.send_message_callback(self.chat_id, f"➡️ _{action.log}_", parse_mode='Markdown')
+        # Логируем действия агента (что он решил сделать)
+        # Если action.log слишком длинный, можно его обрезать
+        log_message = action.log
+        if len(log_message) > 500:
+            log_message = log_message[:497] + "..."
+        await self.send_message_callback(self.chat_id, f"➡️ _{log_message}_", parse_mode='Markdown')
 
     async def on_tool_start(self, serialized: Dict[str, Any], input_str: str, **kwargs: Any) -> Any:
         tool_name = serialized.get("name", "Unknown Tool")
@@ -36,7 +42,10 @@ class TelegramCallbackHandler:
         await self.send_message_callback(self.chat_id, f"✅ *Инструмент завершил работу.* Результат (обрезано): `{truncated_output}`", parse_mode='Markdown')
 
     async def on_agent_finish(self, finish: Any, **kwargs: Any) -> Any:
-        pass # Этот коллбэк для внутренних мыслей агента, не всегда нужно выводить в ТГ
+        # Этот коллбэк для внутренних мыслей агента или финального ответа.
+        # Финальный ответ агента обычно обрабатывается в main Orchestrator-логике.
+        # Здесь можно добавить логирование, если нужно.
+        pass
 
 
 async def create_agent_from_config(agent_id: str, telegram_callback_handler: TelegramCallbackHandler = None):
@@ -49,13 +58,16 @@ async def create_agent_from_config(agent_id: str, telegram_callback_handler: Tel
         return None
 
     # Создаем LLM на основе конфигурации.
-    # Для Агентов 3 и 4 (которые теперь OpenRouter) и которые будут AgentExecutor'ами,
-    # мы привязываем инструменты (web_search) к их LLM.
+    # Для Агентов 3 и 4 (которые теперь OpenRouter) мы привязываем инструменты (web_search) к их LLM.
     llm = llm_integration.get_llm(
         provider=config['llm_provider'],
         model_name=config['llm_model'],
-        agent_id=config['id'] if config['llm_provider'] == 'hyperbolic' else None, # Передаем agent_id только для Hyperbolic
-        bind_tools=(agent_id in ["agent3_hyper2", "agent4_hyper3"]) # Привязываем инструменты к LLM Агентов 3 и 4
+        # Передаем agent_id только для провайдера 'hyperbolic',
+        # так как только для него нужен специфичный ключ из `self.hyperbolic_api_keys`
+        agent_id=config['id'] if config['llm_provider'] == 'hyperbolic' else None,
+        # Привязываем инструменты к LLM Агентов 3 и 4,
+        # так как они будут AgentExecutor'ами, использующими web_search
+        bind_tools=(agent_id in ["agent3_hyper2", "agent4_hyper3"]) 
     )
 
     prompt = ChatPromptTemplate.from_messages(
@@ -67,7 +79,7 @@ async def create_agent_from_config(agent_id: str, telegram_callback_handler: Tel
         ]
     )
     
-    # Агенты 3 и 4 теперь являются AgentExecutor'ами, т.к. их LLM (OpenRouter) поддерживает tool_calling.
+    # Агенты 3 и 4 являются LangChain AgentExecutor'ами, т.к. их LLM (OpenRouter) поддерживает tool_calling.
     if agent_id in ["agent3_hyper2", "agent4_hyper3"]:
         # Создаем AgentExecutor, который будет использовать LLM с привязанными инструментами
         agent = create_tool_calling_agent(llm, ALL_TOOLS, prompt)
@@ -82,7 +94,7 @@ async def create_agent_from_config(agent_id: str, telegram_callback_handler: Tel
     else:
         # Для агентов, которые просто генерируют текст без использования LangChain AgentExecutor
         # (Агент 1, Агент 2, Агент 6)
-        # А также для Агента 5, который является просто LLM, используемым как движок для поиска.
+        # А также для Агента 5 (который является LLM, но не отдельным AgentExecutor в этой архитектуре)
         class SimpleChainWrapper:
             def __init__(self, llm_instance, system_prompt):
                 self.llm_instance = llm_instance
@@ -142,7 +154,23 @@ async def run_full_agent_process(user_query: str, chat_id: int, send_message_cal
         orchestration_plan_raw = a2_result.get('output', "Не удалось получить план оркестрации.")
         
         try:
-            orchestration_plan = json.loads(orchestration_plan_raw)
+            # ИЗМЕНЕНИЯ ЗДЕСЬ: Извлекаем JSON из Markdown блока
+            clean_json_string = orchestration_plan_raw.strip()
+            if clean_json_string.startswith("```json"):
+                # Ищем начало и конец блока JSON
+                json_start_tag = "```json\n"
+                json_end_tag = "\n```"
+                json_start_index = clean_json_string.find(json_start_tag)
+                json_end_index = clean_json_string.rfind(json_end_tag)
+
+                if json_start_index != -1 and json_end_index != -1 and json_end_index > (json_start_index + len(json_start_tag)):
+                    clean_json_string = clean_json_string[json_start_index + len(json_start_tag) : json_end_index].strip()
+                else:
+                    # Если разметка присутствует, но неполная или некорректная, попробуем парсить как есть
+                    logger.warning("Markdown JSON block found but could not be cleanly parsed. Attempting raw JSON load.")
+            
+            orchestration_plan = json.loads(clean_json_string) # Используем очищенную строку
+
             agent3_task = orchestration_plan.get('agent3_task')
             agent4_task = orchestration_plan.get('agent4_task')
 
@@ -169,6 +197,8 @@ async def run_full_agent_process(user_query: str, chat_id: int, send_message_cal
     # --- Шаг 3 & 4: Агенты №3 и №4 (Исследователи) в параллель ---
     await send_message_callback(chat_id, "\n🔄 **Агенты #3 и #4 (Исследователи)**: Запускаю параллельный поиск...", parse_mode='Markdown')
 
+    # Создаем AgentExecutor'ы для Агентов 3 и 4.
+    # Они будут использовать OpenRouter LLM, который имеет привязанный инструмент web_search.
     agent3_executor = await create_agent_from_config("agent3_hyper2", telegram_callback_handler)
     agent4_executor = await create_agent_from_config("agent4_hyper3", telegram_callback_handler)
 
