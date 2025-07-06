@@ -39,9 +39,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     logger.info(f"Received query from chat_id {chat_id}: {user_query}")
 
     # Запускаем оркестратор в отдельной задаче, чтобы бот не зависал
-    # Используем update.message.reply_text как callback для отправки промежуточных сообщений
+    # Передаем context.bot.send_message как callback для отправки промежуточных сообщений
+    # Это важно, так как context.bot.send_message явно принимает chat_id как первый аргумент.
     asyncio.create_task(
-        orchestrator.run_full_agent_process(user_query, chat_id, update.message.reply_text)
+        orchestrator.run_full_agent_process(user_query, chat_id, context.bot.send_message)
     )
     await update.message.reply_text("Ваш запрос принят в работу. Пожалуйста, ожидайте, это может занять некоторое время...")
 
