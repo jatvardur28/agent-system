@@ -1,4 +1,5 @@
 # ~/ai_agent_system/llm_integrations.py
+import json
 import os
 import httpx
 from dotenv import load_dotenv
