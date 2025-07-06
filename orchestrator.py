@@ -6,7 +6,8 @@ from typing import Dict, Any, List
 
 from langchain.agents import AgentExecutor, create_tool_calling_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage # Добавляем AIMessage и ToolMessage для преобразования
+# Импортируем все типы BaseMessage для явного преобразования
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
 from langchain_core.callbacks import BaseCallbackHandler
 
 from llm_integrations import LLMIntegration
@@ -97,35 +98,40 @@ async def create_agent_from_config(agent_id: str, telegram_callback_handler: Tel
                     ("human", "{user_input_content}")
                 ])
                 
-                # Получаем список кортежей (role_str, content_str)
-                # Это универсальный выход из ChatPromptTemplate.format_messages
-                raw_messages_from_prompt_tuples = temp_prompt.format_messages(user_input_content=user_message)
+                # Получаем сообщения от ChatPromptTemplate.
+                # В зависимости от версии, это может быть List[BaseMessage] ИЛИ List[tuple(role_str, content_str)]
+                raw_messages_output = temp_prompt.format_messages(user_input_content=user_message)
                 
-                # ИЗМЕНЕНО: ЯВНО ПРЕОБРАЗУЕМ КОРТЕЖИ В ОБЪЕКТЫ BaseMessage
+                # УНИВЕРСАЛЬНОЕ ПРЕОБРАЗОВАНИЕ В List[BaseMessage]
                 messages_for_llm: List[Any] = []
-                for msg_tuple in raw_messages_from_prompt_tuples:
-                    if len(msg_tuple) == 2 and isinstance(msg_tuple[0], str): # Убедимся, что это (role_str, content_str)
-                        role_str, content_str = msg_tuple
+                for item in raw_messages_output:
+                    if isinstance(item, (SystemMessage, HumanMessage, AIMessage, ToolMessage)):
+                        # Если это уже объект BaseMessage, используем как есть
+                        messages_for_llm.append(item)
+                    elif isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str):
+                        # Если это кортеж ('role', 'content'), преобразуем
+                        role_str, content_str = item
                         if role_str == "system":
                             messages_for_llm.append(SystemMessage(content=content_str))
                         elif role_str == "human":
                             messages_for_llm.append(HumanMessage(content=content_str))
-                        elif role_str == "ai": # Для случаев, когда LLM генерирует AI сообщения
+                        elif role_str == "ai": # Если LLM генерирует AI сообщения, они тоже могут быть в кортежах
                             messages_for_llm.append(AIMessage(content=content_str))
-                        elif role_str == "tool": # Для ToolMessage, если они когда-либо будут генерироваться здесь
-                            messages_for_llm.append(ToolMessage(content=content_str, tool_call_id="unknown_id")) # tool_call_id может потребоваться
+                        elif role_str == "tool": # Если ToolMessage генерируется в таком формате (маловероятно здесь)
+                            messages_for_llm.append(ToolMessage(content=content_str, tool_call_id="unknown_id")) # tool_call_id нужен, но тут заглушка
                         else:
-                            logger.warning(f"Unexpected message role '{role_str}' from ChatPromptTemplate. Treating as HumanMessage.")
+                            logger.warning(f"Unexpected message role '{role_str}' in tuple from ChatPromptTemplate. Treating as HumanMessage.")
                             messages_for_llm.append(HumanMessage(content=f"[{role_str}] {content_str}"))
                     else:
-                        logger.error(f"Unexpected message format from ChatPromptTemplate. Expected (role, content) tuple, got: {msg_tuple}")
-                        messages_for_llm.append(HumanMessage(content=str(msg_tuple))) # Fallback для ошибок
+                        logger.error(f"Unexpected message item format: {type(item)}. Cannot convert. Item: {item}")
+                        messages_for_llm.append(HumanMessage(content=str(item))) # Fallback для ошибок
 
 
                 if hasattr(self.llm_instance, 'generate'): # For our custom HyperbolicLLM
                     response_content = await self.llm_instance.generate(messages_for_llm)
                     return {"output": response_content}
-                else: # For LangChain ChatOpenAI LLM and Nous LLM (теперь OpenRouter)
+                else: # For LangChain ChatOpenAI LLM (Agent 6)
+                    # Теперь LLM должен получить гарантированный список BaseMessage
                     response = await self.llm_instance.ainvoke(messages_for_llm)
                     return {"output": response.content}
 
@@ -170,6 +176,10 @@ async def run_full_agent_process(user_query: str, chat_id: int, send_message_cal
         
         try:
             clean_json_string = orchestration_plan_raw.strip()
+            # Удаляем внешние экранированные скобки {{}} ИЛИ Markdown-блок ```json
+            if clean_json_string.startswith("{{") and clean_json_string.endswith("}}"):
+                clean_json_string = clean_json_string[1:-1].strip()
+            
             if clean_json_string.startswith("```json"):
                 json_start_tag = "```json\n"
                 json_end_tag = "\n```"
