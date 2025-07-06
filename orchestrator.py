@@ -6,8 +6,10 @@ from typing import Dict, Any, List
 
 from langchain.agents import AgentExecutor, create_tool_calling_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-# Импортируем все типы BaseMessage для явного преобразования
+# Импортируем все необходимые типы BaseMessage для явного преобразования
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
+# Также импортируем ChatOpenAI для проверки типа, как предложил Claude
+from langchain_openai import ChatOpenAI # <-- ДОБАВЛЕНО
 from langchain_core.callbacks import BaseCallbackHandler
 
 from llm_integrations import LLMIntegration
@@ -84,56 +86,54 @@ async def create_agent_from_config(agent_id: str, telegram_callback_handler: Tel
             callbacks=[telegram_callback_handler] if telegram_callback_handler else None
         )
         return executor
-    else:
+    else: # Это ветка для SimpleChainWrapper (Агенты 1, 2, 6)
         class SimpleChainWrapper:
             def __init__(self, llm_instance, system_prompt):
                 self.llm_instance = llm_instance
                 self.system_prompt = system_prompt
             
-            async def ainvoke(self, input_data: Dict[str, Any]):
+            async def ainvoke(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
                 user_message = input_data.get('input', '')
                 
-                temp_prompt = ChatPromptTemplate.from_messages([
-                    ("system", self.system_prompt),
-                    ("human", "{user_input_content}")
-                ])
+                # Формируем сообщения в виде списка словарей, как Claude предложил
+                raw_messages_dict_list = []
+                raw_messages_dict_list.append({"role": "system", "content": self.system_prompt})
+                raw_messages_dict_list.append({"role": "user", "content": user_message})
                 
-                # Получаем сообщения от ChatPromptTemplate.
-                # В зависимости от версии, это может быть List[BaseMessage] ИЛИ List[tuple(role_str, content_str)]
-                raw_messages_output = temp_prompt.format_messages(user_input_content=user_message)
-                
-                # УНИВЕРСАЛЬНОЕ ПРЕОБРАЗОВАНИЕ В List[BaseMessage]
+                # ИСПРАВЛЕНИЕ: Создаем объекты LangChain BaseMessage из списка словарей
                 messages_for_llm: List[Any] = []
-                for item in raw_messages_output:
-                    if isinstance(item, (SystemMessage, HumanMessage, AIMessage, ToolMessage)):
-                        # Если это уже объект BaseMessage, используем как есть
-                        messages_for_llm.append(item)
-                    elif isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str):
-                        # Если это кортеж ('role', 'content'), преобразуем
-                        role_str, content_str = item
-                        if role_str == "system":
-                            messages_for_llm.append(SystemMessage(content=content_str))
-                        elif role_str == "human":
-                            messages_for_llm.append(HumanMessage(content=content_str))
-                        elif role_str == "ai": # Если LLM генерирует AI сообщения, они тоже могут быть в кортежах
-                            messages_for_llm.append(AIMessage(content=content_str))
-                        elif role_str == "tool": # Если ToolMessage генерируется в таком формате (маловероятно здесь)
-                            messages_for_llm.append(ToolMessage(content=content_str, tool_call_id="unknown_id")) # tool_call_id нужен, но тут заглушка
-                        else:
-                            logger.warning(f"Unexpected message role '{role_str}' in tuple from ChatPromptTemplate. Treating as HumanMessage.")
-                            messages_for_llm.append(HumanMessage(content=f"[{role_str}] {content_str}"))
+                for msg_dict in raw_messages_dict_list: # Итерируемся по словарям
+                    if msg_dict["role"] == "system":
+                        messages_for_llm.append(SystemMessage(content=msg_dict["content"]))
+                    elif msg_dict["role"] == "user":
+                        messages_for_llm.append(HumanMessage(content=msg_dict["content"]))
+                    elif msg_dict["role"] == "assistant":
+                        messages_for_llm.append(AIMessage(content=msg_dict["content"]))
+                    # Можно добавить обработку tool_message, если они будут использоваться в этом потоке
+                    elif msg_dict["role"] == "tool":
+                        messages_for_llm.append(ToolMessage(content=msg_dict["content"], tool_call_id=msg_dict.get("tool_call_id", "unknown")))
                     else:
-                        logger.error(f"Unexpected message item format: {type(item)}. Cannot convert. Item: {item}")
-                        messages_for_llm.append(HumanMessage(content=str(item))) # Fallback для ошибок
+                        logger.warning(f"Unsupported message role in raw_messages_dict_list: {msg_dict.get('role', 'N/A')}. Treating as HumanMessage.")
+                        messages_for_llm.append(HumanMessage(content=str(msg_dict.get("content", ""))))
 
-
-                if hasattr(self.llm_instance, 'generate'): # For our custom HyperbolicLLM
-                    response_content = await self.llm_instance.generate(messages_for_llm)
-                    return {"output": response_content}
-                else: # For LangChain ChatOpenAI LLM (Agent 6)
-                    # Теперь LLM должен получить гарантированный список BaseMessage
+                # Используем правильный метод в зависимости от типа LLM (как предложил Claude)
+                if isinstance(self.llm_instance, ChatOpenAI): # Для ChatOpenAI (Agent 6)
                     response = await self.llm_instance.ainvoke(messages_for_llm)
-                    return {"output": response.content}
+                    response_content = response.content
+                elif hasattr(self.llm_instance, 'generate'): # Для нашего кастомного HyperbolicLLM (Agent 1, 2)
+                    response_content = await self.llm_instance.generate(messages_for_llm)
+                else: # Fallback (не должно срабатывать, но на всякий случай)
+                    logger.warning(f"Unknown LLM instance type for SimpleChainWrapper: {type(self.llm_instance)}. Attempting ainvoke.")
+                    try:
+                        response = await self.llm_instance.ainvoke(messages_for_llm)
+                        response_content = response.content
+                    except Exception as e:
+                        logger.error(f"Fallback ainvoke failed, attempting generate: {e}")
+                        # Это может быть специфично для вашей версии LangChain
+                        response = await self.llm_instance.generate(messages_for_llm)
+                        response_content = response.generations[0][0].text # LangChain LLM.generate возвращает LLMResult
+                
+                return {"output": response_content}
 
         return SimpleChainWrapper(llm, config['system_prompt'])
 
@@ -178,7 +178,7 @@ async def run_full_agent_process(user_query: str, chat_id: int, send_message_cal
             clean_json_string = orchestration_plan_raw.strip()
             # Удаляем внешние экранированные скобки {{}} ИЛИ Markdown-блок ```json
             if clean_json_string.startswith("{{") and clean_json_string.endswith("}}"):
-                clean_json_string = clean_json_string[1:-1].strip()
+                clean_json_string = clean_json_string[1:-1].strip() # Обрезаем {{ и }}
             
             if clean_json_string.startswith("```json"):
                 json_start_tag = "```json\n"
