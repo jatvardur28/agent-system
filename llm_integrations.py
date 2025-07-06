@@ -41,33 +41,28 @@ class LLMIntegration:
 
                 async def generate(self, messages): # `messages` здесь - это список объектов LangChain BaseMessage
                     api_messages = []
-                    for msg in messages: # <-- ИСПРАВЛЕНИЕ ЗДЕСЬ: Теперь msg - это объект BaseMessage
+                    for msg in messages:
                         if isinstance(msg, SystemMessage):
                             api_messages.append({"role": "system", "content": msg.content})
                         elif isinstance(msg, HumanMessage):
-                            # Обработка контента HumanMessage: может быть str или list (для мультимодальных)
                             if isinstance(msg.content, str):
                                 api_messages.append({"role": "user", "content": msg.content})
                             elif isinstance(msg.content, list):
-                                # Преобразуем список частей контента в строку для текстового LLM
                                 content_parts = []
                                 for part in msg.content:
                                     if isinstance(part, dict) and part.get("type") == "text":
                                         content_parts.append(part.get("text"))
-                                # Если есть другие типы (image_url), они будут проигнорированы
                                 if content_parts:
                                     api_messages.append({"role": "user", "content": " ".join(content_parts)})
                                 else:
                                     logger.warning(f"Unsupported multi-modal content in HumanMessage for HyperbolicLLM: {msg.content}. Using string conversion.")
-                                    api_messages.append({"role": "user", "content": str(msg.content)}) # Fallback
+                                    api_messages.append({"role": "user", "content": str(msg.content)})
                             else:
                                 logger.warning(f"Unexpected HumanMessage content type: {type(msg.content)}. Converting to string.")
-                                api_messages.append({"role": "user", "content": str(msg.content)}) # Fallback
+                                api_messages.append({"role": "user", "content": str(msg.content)})
                         elif isinstance(msg, AIMessage):
                             api_messages.append({"role": "assistant", "content": msg.content})
-                        elif isinstance(msg, ToolMessage): # Если агент должен будет обрабатывать ToolMessage
-                            # В ToolMessage content может быть str, а tool_call_id - str
-                            # Убедитесь, что ваш API LLM поддерживает ToolMessage в этом формате
+                        elif isinstance(msg, ToolMessage):
                             api_messages.append({"role": "tool", "tool_call_id": msg.tool_call_id, "content": msg.content})
                         else:
                             logger.warning(f"Unsupported message type for Hyperbolic API: {type(msg)}. Converting to user message.")
@@ -87,7 +82,7 @@ class LLMIntegration:
                     }
                     try:
                         async with httpx.AsyncClient() as client:
-                            response = await client.post(self.url, headers=headers, json=data, timeout=120)
+                            response = await client.post(self.url, headers=headers, json=data, timeout=180) # <-- УВЕЛИЧЕН ТАЙМАУТ
                             response.raise_for_status()
                             response_json = response.json()
                             if 'choices' in response_json and response_json['choices']:
@@ -114,7 +109,8 @@ class LLMIntegration:
                 model=model_name,
                 openai_api_key=self.openrouter_api_key,
                 base_url="https://openrouter.ai/api/v1",
-                temperature=temperature
+                temperature=temperature,
+                request_timeout=180 # <-- УВЕЛИЧЕН ТАЙМАУТ
             )
             if bind_tools:
                 logger.info(f"Binding web_search tool to OpenRouter LLM: {model_name}")
@@ -127,7 +123,8 @@ class LLMIntegration:
             return ChatOpenAI(
                 model=model_name,
                 openai_api_key=self.nousresearch_api_key,
-                temperature=temperature
+                temperature=temperature,
+                request_timeout=180 # <-- УВЕЛИЧЕН ТАЙМАУТ
             )
         else:
             raise ValueError(f"Unknown LLM provider: {provider}")
@@ -154,6 +151,7 @@ if __name__ == '__main__':
             print("\nTesting OpenRouter LLM with tool binding:")
             openrouter_llm_with_tool = llm_integration.get_llm("openrouter", "mistralai/mistral-7b-instruct-v0.2", bind_tools=True)
             print(f"OpenRouter LLM with tool initialized: {openrouter_llm_with_tool.tools}")
+            # You would typically test tool calling via AgentExecutor in orchestrator
         except Exception as e:
             print(f"Error testing OpenRouter LLM with tools: {e}")
             
@@ -165,7 +163,6 @@ if __name__ == '__main__':
                 SystemMessage(content="You are a helpful assistant."),
                 HumanMessage(content="Who is Alan Turing?")
             ]
-            # Для NousResearch (который является ChatOpenAI) напрямую передаем список сообщений
             nous_response = await nous_llm.ainvoke(test_messages)
             print(f"NousResearch response: {nous_response.content}")
         except Exception as e:
