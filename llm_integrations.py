@@ -124,6 +124,7 @@ class LLMIntegration:
             return ChatOpenAI(
                 model=model_name,
                 openai_api_key=self.nousresearch_api_key,
+                base_url="https://api.nousresearch.com/v1",
                 temperature=temperature,
                 request_timeout=180 # <-- УВЕЛИЧЕН ТАЙМАУТ
             )
